@@ -2,56 +2,33 @@ import dash
 from dash import dcc, html, Input, Output
 import plotly.graph_objs as go
 import pandas as pd
-import requests
-import time
-import os
+import yfinance as yf
 from datetime import datetime, timedelta
-
-# Get API key from environment variable (secure) or use default for local testing
-API_KEY = os.environ.get('ALPHAVANTAGE_API_KEY', '1F15KKVN0EN9XRR5')
+import time
 
 pharma_stocks = {
-    'SUNPHARMA': 'Sun Pharma',
-    'DRREDDY': "Dr. Reddy's Labs",
-    'CIPLA': 'Cipla',
-    'LUPIN': 'Lupin',
-    'AUROPHARMA': 'Aurobindo Pharma',
-    'DIVISLAB': "Divi's Laboratories"
+    'SUNPHARMA.NS': 'Sun Pharma',
+    'DRREDDY.NS': "Dr. Reddy's Labs",
+    'CIPLA.NS': 'Cipla',
+    'LUPIN.NS': 'Lupin',
+    'AUROPHARMA.NS': 'Aurobindo Pharma',
+    'DIVISLAB.NS': "Divi's Laboratories"
 }
 
-def get_stock_data_alpha(symbol, outputsize='full'):
-    try:
-        url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&outputsize={outputsize}&apikey={API_KEY}'
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        
-        if 'Time Series (Daily)' not in data:
-            print(f"Error fetching {symbol}: {data.get('Note', data.get('Error Message', 'Unknown'))}")
-            return None
-        
-        time_series = data['Time Series (Daily)']
-        df = pd.DataFrame.from_dict(time_series, orient='index')
-        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-        df.index = pd.to_datetime(df.index)
-        df = df.sort_index()
-        
-        for col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        return df
-    except Exception as e:
-        print(f"Error fetching {symbol}: {e}")
-        return None
-
-def filter_by_period(df, period):
-    if df is None or len(df) == 0:
-        return None
-    
-    end_date = df.index[-1]
-    period_map = {'1mo': 30, '3mo': 90, '6mo': 180, '1y': 365, '2y': 730}
-    days = period_map.get(period, 365)
-    start_date = end_date - timedelta(days=days)
-    return df[df.index >= start_date]
+def get_stock_data(ticker, period='1y', retries=3):
+    for attempt in range(retries):
+        try:
+            stock = yf.Ticker(ticker)
+            df = stock.history(period=period)
+            if df.empty:
+                time.sleep(2)
+                continue
+            return df
+        except:
+            if attempt < retries - 1:
+                time.sleep(2)
+            continue
+    return None
 
 def calculate_change(df):
     if df is not None and len(df) > 0:
@@ -71,7 +48,7 @@ app.layout = html.Div([
     html.Div([
         html.H1('📊 Indian Pharmaceutical Stocks Dashboard', 
                 style={'textAlign': 'center', 'color': '#2c3e50', 'marginTop': '20px', 'fontFamily': 'Arial, sans-serif', 'fontSize': '42px'}),
-        html.P('Live data from Alpha Vantage | NSE India', style={'textAlign': 'center', 'color': '#7f8c8d', 'fontSize': '16px', 'marginBottom': '30px'})
+        html.P('Live data from Yahoo Finance | NSE India', style={'textAlign': 'center', 'color': '#7f8c8d', 'fontSize': '16px', 'marginBottom': '30px'})
     ]),
     
     html.Div([
@@ -106,12 +83,10 @@ app.layout = html.Div([
     ),
     
     html.Div([
-        html.P('💡 First load may take 1-2 minutes (fetching data for 6 stocks)', 
+        html.P('💡 Data fetches may take 30-60 seconds | Free market data from Yahoo Finance', 
                style={'textAlign': 'center', 'color': '#95a5a6', 'fontSize': '14px', 'marginTop': '20px'})
     ])
 ], style={'backgroundColor': '#ecf0f1', 'minHeight': '100vh', 'padding': '20px'})
-
-cached_data = {}
 
 @app.callback(
     [Output('summary-cards', 'children'),
@@ -124,24 +99,26 @@ def update_dashboard(selected_period, n_clicks):
     all_data = {}
     performance_data = []
     
-    for symbol, name in pharma_stocks.items():
-        if symbol not in cached_data:
-            print(f"Fetching {name}...")
-            df = get_stock_data_alpha(symbol)
-            if df is not None:
-                cached_data[symbol] = df
-            time.sleep(13)
-        
-        df = filter_by_period(cached_data.get(symbol), selected_period)
+    print(f"Fetching data for period: {selected_period}")
+    
+    for ticker, name in pharma_stocks.items():
+        print(f"Fetching {name}...")
+        df = get_stock_data(ticker, selected_period)
         
         if df is not None and len(df) > 0:
             pct_change = calculate_change(df)
             current_price = df['Close'].iloc[-1]
             all_data[name] = {'df': df, 'change': pct_change, 'current_price': current_price}
             performance_data.append({'Company': name, 'Change': pct_change, 'Price': current_price})
+            print(f"✓ {name}: ₹{current_price:.2f} ({pct_change:+.2f}%)")
+        else:
+            print(f"✗ Failed to load {name}")
     
     if not performance_data:
-        return html.Div([html.H3('⚠️ Loading data... Please wait 1-2 minutes and refresh', style={'textAlign': 'center'})]), go.Figure(), []
+        return html.Div([
+            html.H3('⚠️ Unable to fetch stock data', style={'textAlign': 'center', 'color': '#e74c3c', 'marginTop': '100px'}),
+            html.P('Please try clicking "Refresh Data" button', style={'textAlign': 'center', 'color': '#7f8c8d'})
+        ]), go.Figure(), []
     
     performance_df = pd.DataFrame(performance_data).sort_values('Change', ascending=False)
     best = performance_df.iloc[0]
@@ -151,23 +128,23 @@ def update_dashboard(selected_period, n_clicks):
     summary = html.Div([
         html.Div([
             html.Div([
-                html.H3('🏆 Best', style={'color': '#27ae60'}),
-                html.H2(best['Company']),
+                html.H3('🏆 Best Performer', style={'color': '#27ae60', 'marginBottom': '10px'}),
+                html.H2(best['Company'], style={'marginBottom': '5px'}),
                 html.P(f"+{best['Change']:.2f}%", style={'fontSize': '24px', 'color': '#27ae60', 'fontWeight': 'bold'})
-            ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center'}),
+            ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center', 'boxShadow': '0 4px 6px rgba(0,0,0,0.1)'}),
             
             html.Div([
-                html.H3('📊 Average', style={'color': '#3498db'}),
-                html.H2('All Stocks'),
+                html.H3('📊 Average Performance', style={'color': '#3498db', 'marginBottom': '10px'}),
+                html.H2('All Stocks', style={'marginBottom': '5px'}),
                 html.P(f"{avg:+.2f}%", style={'fontSize': '24px', 'color': '#3498db', 'fontWeight': 'bold'})
-            ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center'}),
+            ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center', 'boxShadow': '0 4px 6px rgba(0,0,0,0.1)'}),
             
             html.Div([
-                html.H3('📉 Worst', style={'color': '#e74c3c'}),
-                html.H2(worst['Company']),
+                html.H3('📉 Worst Performer', style={'color': '#e74c3c', 'marginBottom': '10px'}),
+                html.H2(worst['Company'], style={'marginBottom': '5px'}),
                 html.P(f"{worst['Change']:.2f}%", style={'fontSize': '24px', 'color': '#e74c3c', 'fontWeight': 'bold'})
-            ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center'}),
-        ], style={'display': 'flex', 'flexWrap': 'wrap', 'marginBottom': '30px'})
+            ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center', 'boxShadow': '0 4px 6px rgba(0,0,0,0.1)'}),
+        ], style={'display': 'flex', 'flexWrap': 'wrap', 'marginBottom': '30px', 'justifyContent': 'space-around'})
     ])
     
     comp_fig = go.Figure()
@@ -178,7 +155,15 @@ def update_dashboard(selected_period, n_clicks):
         normalized = (df['Close'] / df['Close'].iloc[0]) * 100
         comp_fig.add_trace(go.Scatter(x=df.index, y=normalized, mode='lines', name=name, line=dict(color=colors[idx], width=3)))
     
-    comp_fig.update_layout(title='Normalized (Base=100)', height=500, plot_bgcolor='white')
+    comp_fig.update_layout(
+        title='Normalized Performance (Base = 100)',
+        xaxis_title='Date',
+        yaxis_title='Indexed Value',
+        height=500, 
+        plot_bgcolor='white',
+        hovermode='x unified',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
     
     graphs = []
     for name, data in all_data.items():
@@ -187,21 +172,29 @@ def update_dashboard(selected_period, n_clicks):
         change_symbol = '▲' if pct_change >= 0 else '▼'
         
         price_fig = go.Figure()
-        price_fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', line=dict(color='#3498db', width=2), fill='tozeroy'))
-        price_fig.update_layout(title=f'{name}', height=350, plot_bgcolor='white')
+        price_fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', line=dict(color='#3498db', width=2), fill='tozeroy', fillcolor='rgba(52, 152, 219, 0.1)'))
+        price_fig.update_layout(title=f'{name} - Stock Price Trend', xaxis_title='Date', yaxis_title='Price (₹)', height=350, plot_bgcolor='white', hovermode='x unified')
+        
+        volume_fig = go.Figure()
+        volume_fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='rgba(52, 152, 219, 0.6)'))
+        volume_fig.update_layout(title='Trading Volume', xaxis_title='Date', yaxis_title='Volume', height=250, plot_bgcolor='white')
         
         graphs.append(html.Div([
             html.Div([
-                html.H2(name, style={'color': '#2c3e50'}),
-                html.H3(f'₹{current_price:.2f}'),
-                html.P(f'{change_symbol} {pct_change:.2f}%', style={'color': change_color, 'fontSize': '18px'})
-            ]),
-            dcc.Graph(figure=price_fig)
-        ], style={'backgroundColor': 'white', 'borderRadius': '10px', 'padding': '25px', 'marginBottom': '30px'}))
+                html.Div([
+                    html.H2(name, style={'marginBottom': '5px', 'color': '#2c3e50'}),
+                    html.P(f'Current: ₹{current_price:.2f}', style={'color': '#7f8c8d', 'fontSize': '14px'})
+                ], style={'flex': '1'}),
+                html.Div([
+                    html.P(f'{change_symbol} {pct_change:.2f}%', style={'color': change_color, 'fontSize': '24px', 'fontWeight': 'bold', 'marginBottom': '0'})
+                ], style={'textAlign': 'right'})
+            ], style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'marginBottom': '20px'}),
+            dcc.Graph(figure=price_fig),
+            dcc.Graph(figure=volume_fig)
+        ], style={'backgroundColor': 'white', 'borderRadius': '10px', 'padding': '25px', 'marginBottom': '30px', 'boxShadow': '0 4px 6px rgba(0,0,0,0.1)'}))
     
     return summary, comp_fig, graphs
 
 if __name__ == '__main__':
-    print("Starting dashboard with Alpha Vantage...")
-    print(f"Using API key: {API_KEY[:4]}...{API_KEY[-4:]}")  # Print partial key for verification
+    print("Starting dashboard...")
     app.run(debug=True, host='0.0.0.0', port=8050)
