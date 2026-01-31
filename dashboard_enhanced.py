@@ -4,9 +4,11 @@ import plotly.graph_objs as go
 import pandas as pd
 import requests
 import time
+import os
 from datetime import datetime, timedelta
 
-API_KEY = '1F15KKVN0EN9XRR5'
+# Get API key from environment variable (secure) or use default for local testing
+API_KEY = os.environ.get('ALPHAVANTAGE_API_KEY', '1F15KKVN0EN9XRR5')
 
 pharma_stocks = {
     'SUNPHARMA': 'Sun Pharma',
@@ -200,4 +202,6 @@ def update_dashboard(selected_period, n_clicks):
     return summary, comp_fig, graphs
 
 if __name__ == '__main__':
+    print("Starting dashboard with Alpha Vantage...")
+    print(f"Using API key: {API_KEY[:4]}...{API_KEY[-4:]}")  # Print partial key for verification
     app.run(debug=True, host='0.0.0.0', port=8050)
