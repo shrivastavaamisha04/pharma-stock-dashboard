@@ -2,33 +2,54 @@ import dash
 from dash import dcc, html, Input, Output
 import plotly.graph_objs as go
 import pandas as pd
-import yfinance as yf
+import requests
 import time
+from datetime import datetime, timedelta
+
+API_KEY = '1F15KKVN0EN9XRR5'
 
 pharma_stocks = {
-    'SUNPHARMA.NS': 'Sun Pharma',
-    'DRREDDY.NS': "Dr. Reddy's Labs",
-    'CIPLA.NS': 'Cipla',
-    'LUPIN.NS': 'Lupin',
-    'AUROPHARMA.NS': 'Aurobindo Pharma',
-    'DIVISLAB.NS': "Divi's Laboratories"
+    'SUNPHARMA': 'Sun Pharma',
+    'DRREDDY': "Dr. Reddy's Labs",
+    'CIPLA': 'Cipla',
+    'LUPIN': 'Lupin',
+    'AUROPHARMA': 'Aurobindo Pharma',
+    'DIVISLAB': "Divi's Laboratories"
 }
 
-def get_stock_data(ticker, period='1y', retries=3):
-    for attempt in range(retries):
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period=period)
-            if df.empty:
-                time.sleep(2)
-                continue
-            info = stock.info if hasattr(stock, 'info') else {}
-            return df, info
-        except:
-            if attempt < retries - 1:
-                time.sleep(2)
-            continue
-    return None, {}
+def get_stock_data_alpha(symbol, outputsize='full'):
+    try:
+        url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&outputsize={outputsize}&apikey={API_KEY}'
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        if 'Time Series (Daily)' not in data:
+            print(f"Error fetching {symbol}: {data.get('Note', data.get('Error Message', 'Unknown'))}")
+            return None
+        
+        time_series = data['Time Series (Daily)']
+        df = pd.DataFrame.from_dict(time_series, orient='index')
+        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+        
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        return df
+    except Exception as e:
+        print(f"Error fetching {symbol}: {e}")
+        return None
+
+def filter_by_period(df, period):
+    if df is None or len(df) == 0:
+        return None
+    
+    end_date = df.index[-1]
+    period_map = {'1mo': 30, '3mo': 90, '6mo': 180, '1y': 365, '2y': 730}
+    days = period_map.get(period, 365)
+    start_date = end_date - timedelta(days=days)
+    return df[df.index >= start_date]
 
 def calculate_change(df):
     if df is not None and len(df) > 0:
@@ -41,29 +62,16 @@ def calculate_change(df):
             pass
     return 0
 
-def format_number(num):
-    try:
-        num = float(num)
-        if num >= 1e12:
-            return f"₹{num/1e12:.2f}T"
-        elif num >= 1e9:
-            return f"₹{num/1e9:.2f}B"
-        elif num >= 1e7:
-            return f"₹{num/1e7:.2f}Cr"
-        else:
-            return f"₹{num:,.0f}"
-    except:
-        return "N/A"
-
 app = dash.Dash(__name__)
 server = app.server
 
 app.layout = html.Div([
     html.Div([
         html.H1('📊 Indian Pharmaceutical Stocks Dashboard', 
-                style={'textAlign': 'center', 'color': '#2c3e50', 'marginTop': '20px', 'marginBottom': '10px', 'fontFamily': 'Arial, sans-serif', 'fontSize': '42px'}),
-        html.P('Live data from National Stock Exchange of India', style={'textAlign': 'center', 'color': '#7f8c8d', 'fontSize': '16px', 'marginBottom': '30px'})
+                style={'textAlign': 'center', 'color': '#2c3e50', 'marginTop': '20px', 'fontFamily': 'Arial, sans-serif', 'fontSize': '42px'}),
+        html.P('Live data from Alpha Vantage | NSE India', style={'textAlign': 'center', 'color': '#7f8c8d', 'fontSize': '16px', 'marginBottom': '30px'})
     ]),
+    
     html.Div([
         html.Label('Select Time Period:', style={'fontSize': '18px', 'fontWeight': 'bold', 'marginRight': '10px'}),
         dcc.Dropdown(
@@ -77,8 +85,11 @@ app.layout = html.Div([
             ],
             value='1y',
             style={'width': '200px', 'display': 'inline-block'}
-        )
+        ),
+        html.Button('Refresh Data', id='refresh-button', n_clicks=0, 
+                   style={'marginLeft': '20px', 'padding': '10px 20px', 'fontSize': '16px', 'backgroundColor': '#3498db', 'color': 'white', 'border': 'none', 'borderRadius': '5px'})
     ], style={'textAlign': 'center', 'margin': '20px'}),
+    
     dcc.Loading(
         id="loading",
         type="circle",
@@ -90,68 +101,86 @@ app.layout = html.Div([
             ], style={'padding': '20px', 'backgroundColor': 'white', 'borderRadius': '10px', 'margin': '20px'}),
             html.Div(id='graphs-container')
         ]
-    )
+    ),
+    
+    html.Div([
+        html.P('💡 First load may take 1-2 minutes (fetching data for 6 stocks)', 
+               style={'textAlign': 'center', 'color': '#95a5a6', 'fontSize': '14px', 'marginTop': '20px'})
+    ])
 ], style={'backgroundColor': '#ecf0f1', 'minHeight': '100vh', 'padding': '20px'})
+
+cached_data = {}
 
 @app.callback(
     [Output('summary-cards', 'children'),
      Output('comparison-chart', 'figure'),
      Output('graphs-container', 'children')],
-    [Input('period-dropdown', 'value')]
+    [Input('period-dropdown', 'value'),
+     Input('refresh-button', 'n_clicks')]
 )
-def update_dashboard(selected_period):
+def update_dashboard(selected_period, n_clicks):
     all_data = {}
     performance_data = []
     
-    for ticker, name in pharma_stocks.items():
-        df, info = get_stock_data(ticker, selected_period)
+    for symbol, name in pharma_stocks.items():
+        if symbol not in cached_data:
+            print(f"Fetching {name}...")
+            df = get_stock_data_alpha(symbol)
+            if df is not None:
+                cached_data[symbol] = df
+            time.sleep(13)
+        
+        df = filter_by_period(cached_data.get(symbol), selected_period)
+        
         if df is not None and len(df) > 0:
             pct_change = calculate_change(df)
-            current_price = df['Close'].iloc[-1] if 'Close' in df.columns else 0
-            all_data[name] = {'df': df, 'info': info, 'change': pct_change, 'current_price': current_price, 'ticker': ticker}
+            current_price = df['Close'].iloc[-1]
+            all_data[name] = {'df': df, 'change': pct_change, 'current_price': current_price}
             performance_data.append({'Company': name, 'Change': pct_change, 'Price': current_price})
     
     if not performance_data:
-        return html.Div([html.H3('⚠️ Unable to fetch data', style={'textAlign': 'center'})]), go.Figure(), []
+        return html.Div([html.H3('⚠️ Loading data... Please wait 1-2 minutes and refresh', style={'textAlign': 'center'})]), go.Figure(), []
     
     performance_df = pd.DataFrame(performance_data).sort_values('Change', ascending=False)
-    best = performance_df.iloc[0] if len(performance_df) > 0 else None
-    worst = performance_df.iloc[-1] if len(performance_df) > 0 else None
+    best = performance_df.iloc[0]
+    worst = performance_df.iloc[-1]
     avg = performance_df['Change'].mean()
     
     summary = html.Div([
         html.Div([
             html.Div([
                 html.H3('🏆 Best', style={'color': '#27ae60'}),
-                html.H2(best['Company'] if best is not None else 'N/A'),
-                html.P(f"+{best['Change']:.2f}%" if best is not None else 'N/A', style={'fontSize': '24px', 'color': '#27ae60'})
+                html.H2(best['Company']),
+                html.P(f"+{best['Change']:.2f}%", style={'fontSize': '24px', 'color': '#27ae60', 'fontWeight': 'bold'})
             ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center'}),
+            
             html.Div([
                 html.H3('📊 Average', style={'color': '#3498db'}),
                 html.H2('All Stocks'),
-                html.P(f"{avg:+.2f}%", style={'fontSize': '24px', 'color': '#3498db'})
+                html.P(f"{avg:+.2f}%", style={'fontSize': '24px', 'color': '#3498db', 'fontWeight': 'bold'})
             ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center'}),
+            
             html.Div([
                 html.H3('📉 Worst', style={'color': '#e74c3c'}),
-                html.H2(worst['Company'] if worst is not None else 'N/A'),
-                html.P(f"{worst['Change']:.2f}%" if worst is not None else 'N/A', style={'fontSize': '24px', 'color': '#e74c3c'})
-            ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center'})
+                html.H2(worst['Company']),
+                html.P(f"{worst['Change']:.2f}%", style={'fontSize': '24px', 'color': '#e74c3c', 'fontWeight': 'bold'})
+            ], style={'backgroundColor': 'white', 'padding': '25px', 'borderRadius': '10px', 'flex': '1', 'margin': '10px', 'textAlign': 'center'}),
         ], style={'display': 'flex', 'flexWrap': 'wrap', 'marginBottom': '30px'})
     ])
     
     comp_fig = go.Figure()
     colors = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c']
+    
     for idx, (name, data) in enumerate(all_data.items()):
         df = data['df']
-        if len(df) > 0:
-            normalized = (df['Close'] / df['Close'].iloc[0]) * 100
-            comp_fig.add_trace(go.Scatter(x=df.index, y=normalized, mode='lines', name=name, line=dict(color=colors[idx % len(colors)], width=3)))
+        normalized = (df['Close'] / df['Close'].iloc[0]) * 100
+        comp_fig.add_trace(go.Scatter(x=df.index, y=normalized, mode='lines', name=name, line=dict(color=colors[idx], width=3)))
     
-    comp_fig.update_layout(title='Normalized (Base=100)', height=500, plot_bgcolor='white', paper_bgcolor='white')
+    comp_fig.update_layout(title='Normalized (Base=100)', height=500, plot_bgcolor='white')
     
     graphs = []
     for name, data in all_data.items():
-        df, info, pct_change, current_price, ticker = data['df'], data['info'], data['change'], data['current_price'], data['ticker']
+        df, pct_change, current_price = data['df'], data['change'], data['current_price']
         change_color = '#27ae60' if pct_change >= 0 else '#e74c3c'
         change_symbol = '▲' if pct_change >= 0 else '▼'
         
@@ -162,9 +191,9 @@ def update_dashboard(selected_period):
         graphs.append(html.Div([
             html.Div([
                 html.H2(name, style={'color': '#2c3e50'}),
-                html.H3(f'₹{current_price:.2f}', style={'color': '#2c3e50'}),
+                html.H3(f'₹{current_price:.2f}'),
                 html.P(f'{change_symbol} {pct_change:.2f}%', style={'color': change_color, 'fontSize': '18px'})
-            ], style={'marginBottom': '20px'}),
+            ]),
             dcc.Graph(figure=price_fig)
         ], style={'backgroundColor': 'white', 'borderRadius': '10px', 'padding': '25px', 'marginBottom': '30px'}))
     
